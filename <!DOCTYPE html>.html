@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Divyansh Singh Tomar - Clean Energy Portfolio</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for 'Inter' font and smooth scrolling */
+        body {
+            font-family: 'Inter', sans-serif;
+            scroll-behavior: smooth;
+        }
+        /* Custom block styles for the diagrams */
+        .diagram-block {
+            @apply p-4 bg-white/70 shadow-lg rounded-xl text-center border-2 border-green-500 transition duration-300 ease-in-out hover:scale-[1.02];
+        }
+        .diagram-arrow {
+            @apply text-4xl text-green-700 my-2;
+        }
+        .content-section {
+            @apply p-6 lg:p-10 bg-white rounded-xl shadow-2xl;
+        }
+        .llm-output-box {
+            @apply mt-4 p-4 border border-gray-200 rounded-lg bg-gray-50 text-gray-700;
+        }
+        .llm-output-box p {
+            margin-bottom: 0.5rem;
+        }
+    </style>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'primary-green': '#10b981', /* Emerald Green */
+                        'secondary-blue': '#3b82f6', /* Blue */
+                    },
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+
+    <script type="module">
+        // Global environment variables (required setup)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const apiKey = ""; // API key is handled by the environment
+
+        // --- TTS Utility Functions (Required for PCM conversion) ---
+
+        function base64ToArrayBuffer(base64) {
+            const binaryString = atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        function pcmToWav(pcm16, sampleRate) {
+            const numChannels = 1;
+            const bytesPerSample = 2; // Int16 is 2 bytes
+            const blockAlign = numChannels * bytesPerSample;
+            const byteRate = sampleRate * blockAlign;
+            const dataSize = pcm16.length * bytesPerSample;
+            const buffer = new ArrayBuffer(44 + dataSize);
+            const view = new DataView(buffer);
+
+            function writeString(view, offset, string) {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
+                }
+            }
+
+            // RIFF identifier 'RIFF'
+            writeString(view, 0, 'RIFF');
+            // File size (36 + dataSize)
+            view.setUint32(4, 36 + dataSize, true);
+            // Format 'WAVE'
+            writeString(view, 8, 'WAVE');
+            // Sub-chunk 1 identifier 'fmt '
+            writeString(view, 12, 'fmt ');
+            // Sub-chunk 1 size (16 for PCM)
+            view.setUint32(16, 16, true);
+            // Audio format (1 for PCM)
+            view.setUint16(20, 1, true);
+            // Number of channels (1)
+            view.setUint16(22, numChannels, true);
+            // Sample rate
+            view.setUint32(24, sampleRate, true);
+            // Byte rate
+            view.setUint32(28, byteRate, true);
+            // Block align
+            view.setUint16(32, blockAlign, true);
+            // Bits per sample (16)
+            view.setUint16(34, 16, true);
+            // Sub-chunk 2 identifier 'data'
+            writeString(view, 36, 'data');
+            // Sub-chunk 2 size
+            view.setUint32(40, dataSize, true);
+
+            // Write PCM data
+            let offset = 44;
+            for (let i = 0; i < pcm16.length; i++) {
+                view.setInt16(offset, pcm16[i], true);
+                offset += 2;
+            }
+
+            return new Blob([view], { type: 'audio/wav' });
+        }
+        
+        // --- Core Gemini API Fetcher ---
+
+        /**
+         * Fetches content from the Gemini API, optionally using Google Search grounding.
+         * @param {string} userQuery - The specific task for the LLM.
+         * @param {string} systemPrompt - Persona and instruction for the LLM.
+         * @param {boolean} useGrounding - Whether to enable Google Search grounding.
+         * @returns {Promise<string>} The generated text.
+         */
+        async function fetchLLMResponse(userQuery, systemPrompt, useGrounding = false) {
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+            };
+
+            if (useGrounding) {
+                payload.tools = [{ "google_search": {} }];
+            }
+
+            let response;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (response.ok) break;
+                } catch (error) {
+                    console.error('Fetch error:', error);
+                }
+                if (attempt < 2) {
+                    await new Promise(resolve => setTimeout(resolve, 2 ** attempt * 1000));
+                }
+            }
+
+            if (!response || !response.ok) {
+                throw new Error('LLM API request failed after multiple retries.');
+            }
+
+            const result = await response.json();
+            const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+            
+            if (!text) {
+                throw new Error('Received empty or unexpected response from LLM.');
+            }
+
+            // Extract and append sources if grounding was used
+            let sources = '';
+            const groundingMetadata = result.candidates?.[0]?.groundingMetadata;
+            if (useGrounding && groundingMetadata && groundingAttributions) {
+                const uniqueSources = groundingMetadata.groundingAttributions
+                    .map(attr => ({ uri: attr.web?.uri, title: attr.web?.title }))
+                    .filter((source, index, self) => 
+                         source.uri && source.title && index === self.findIndex(t => t.uri === source.uri));
+
+                if (uniqueSources.length > 0) {
+                    sources = '<p class="text-xs mt-3 font-semibold text-gray-500">Sources:</p>';
+                    uniqueSources.forEach(s => {
+                        sources += `<p class="text-xs text-gray-500"><a href="${s.uri}" target="_blank" class="hover:underline">${s.title || s.uri}</a></p>`;
+                    });
+                }
+            }
+
+            return text + sources;
+        }
+
+
+        // --- Activity 1: Sustainability Analysis (Existing) ---
+        window.analyzeTidalSustainability = async function() {
+            const outputDiv = document.getElementById('tidal-analysis-output');
+            outputDiv.innerHTML = '<p class="text-center text-primary-green">Loading analysis... please wait. (Using Google Search for grounding) ⏳</p>';
+            
+            const tidalExplanation = document.querySelector('#activity1 p.text-lg').innerText;
+            const userQuery = `Analyze the sustainability of the tidal power system described here: "${tidalExplanation}". Focus the output on two key environmental benefits and two primary ecological challenges of tidal barrage systems. Provide the response as a list.`;
+            const systemPrompt = "You are a renewable energy expert. Provide a concise, neutral, and factual sustainability analysis based on the provided text and latest information.";
+            
+            try {
+                const analysisText = await fetchLLMResponse(userQuery, systemPrompt, true);
+                
+                // Convert markdown list to HTML list for clean rendering
+                const htmlContent = analysisText.replace(/^- (.*)/gm, '<li>$1</li>');
+                outputDiv.innerHTML = `<div class="llm-output-box border-secondary-blue"><h4 class="font-bold text-lg text-secondary-blue">Sustainability Analysis: Tidal Barrage</h4><ul class="list-disc list-inside space-y-2">${htmlContent}</ul></div>`;
+
+            } catch (error) {
+                outputDiv.innerHTML = `<p class="text-red-500">Error generating analysis: ${error.message}</p>`;
+            }
+        };
+
+        // --- Activity 1: Maritime Glossary Lookup (NEW) ---
+        window.lookupGlossaryTerm = async function() {
+            const term = document.getElementById('glossary-term-input').value.trim();
+            const outputDiv = document.getElementById('glossary-output');
+            if (!term) {
+                outputDiv.innerHTML = '<p class="text-red-500">Please enter a term to define (e.g., "head," "sluice gate").</p>';
+                return;
+            }
+
+            outputDiv.innerHTML = `<p class="text-center text-secondary-blue">Looking up definition for "${term}"... ⏳</p>`;
+
+            const userQuery = `Define the technical term "${term}" as it relates specifically to tidal energy or large-scale hydroelectric power generation. Keep the definition concise and focused on engineering principles.`;
+            const systemPrompt = "You are a maritime engineering professor. Provide a highly accurate, technical definition of the requested term in one sentence.";
+            
+            try {
+                const definitionText = await fetchLLMResponse(userQuery, systemPrompt, false);
+                
+                outputDiv.innerHTML = `<div class="llm-output-box border-secondary-blue"><h4 class="font-bold text-lg text-secondary-blue">Glossary Definition: ${term}</h4><p>${definitionText}</p></div>`;
+
+            } catch (error) {
+                outputDiv.innerHTML = `<p class="text-red-500">Error defining term: ${error.message}</p>`;
+            }
+        };
+
+        // --- Activity 2: Biogas Efficiency Checklist (Existing) ---
+        window.generateBiogasChecklist = async function() {
+            const outputDiv = document.getElementById('biogas-checklist-output');
+            outputDiv.innerHTML = '<p class="text-center text-primary-green">Generating operational checklist... ⏳</p>';
+            
+            const biogasExplanation = document.querySelector('#activity2 p.text-lg').innerText;
+            const userQuery = `Based on the dairy farm biogas system described here: "${biogasExplanation}", generate a 5-point operational checklist to maximize methane yield and system efficiency, focusing on temperature, mixing, and feeding rate.`;
+            const systemPrompt = "You are an agricultural waste management consultant. Provide a checklist (5 bullet points only) for optimizing anaerobic digester performance for a dairy farm, ensuring the advice is practical and highly actionable.";
+            
+            try {
+                const checklistText = await fetchLLMResponse(userQuery, systemPrompt, false);
+                
+                // Convert markdown list to HTML list
+                const htmlContent = checklistText.replace(/^- (.*)/gm, '<li>$1</li>');
+                outputDiv.innerHTML = `<div class="llm-output-box border-primary-green"><h4 class="font-bold text-lg text-primary-green">Biogas Optimization Checklist</h4><ul class="list-disc list-inside space-y-2">${htmlContent}</ul></div>`;
+
+            } catch (error) {
+                outputDiv.innerHTML = `<p class="text-red-500">Error generating checklist: ${error.message}</p>`;
+            }
+        };
+
+        // --- Activity 3: Geothermal Text-to-Speech (Existing) ---
+        window.readGeothermalExplanation = async function() {
+            const ttsButton = document.getElementById('tts-button');
+            const audioPlayer = document.getElementById('audio-player');
+            const explanationText = document.querySelector('#activity3 p.text-lg').innerText;
+
+            ttsButton.disabled = true;
+            ttsButton.innerHTML = 'Generating Audio... 🎙️';
+            audioPlayer.src = '';
+            
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+            
+            // Note: We instruct the model to read the content in an 'Informative' voice.
+            const payload = {
+                contents: [{
+                    parts: [{ text: `Read the following explanation in an informative and clear voice:\n\n${explanationText}` }]
+                }],
+                generationConfig: {
+                    responseModalities: ["AUDIO"],
+                    speechConfig: {
+                        voiceConfig: {
+                            prebuiltVoiceConfig: { voiceName: "Charon" } // Informative voice
+                        }
+                    }
+                },
+                model: "gemini-2.5-flash-preview-tts"
+            };
+
+            let response;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (response.ok) break;
+                } catch (error) {
+                    console.error('TTS Fetch error:', error);
+                }
+                if (attempt < 2) {
+                    await new Promise(resolve => setTimeout(resolve, 2 ** attempt * 1000));
+                }
+            }
+
+            try {
+                if (!response || !response.ok) {
+                    throw new Error('TTS API request failed after multiple retries.');
+                }
+                const result = await response.json();
+                const part = result?.candidates?.[0]?.content?.parts?.[0];
+                const audioData = part?.inlineData?.data;
+                const mimeType = part?.inlineData?.mimeType;
+
+                if (audioData && mimeType && mimeType.startsWith("audio/")) {
+                    const match = mimeType.match(/rate=(\d+)/);
+                    const sampleRate = match ? parseInt(match[1], 10) : 16000; // Default to 16000 if rate is missing
+
+                    const pcmData = base64ToArrayBuffer(audioData);
+                    const pcm16 = new Int16Array(pcmData);
+                    const wavBlob = pcmToWav(pcm16, sampleRate);
+                    const audioUrl = URL.createObjectURL(wavBlob);
+
+                    audioPlayer.src = audioUrl;
+                    audioPlayer.play();
+                    ttsButton.innerHTML = '🔊 Playing... (Re-click to restart) ';
+                } else {
+                     throw new Error('TTS response missing audio data.');
+                }
+            } catch (error) {
+                console.error('TTS Error:', error);
+                ttsButton.innerHTML = `TTS Error: ${error.message.split(':')[0]} ❌`;
+            } finally {
+                ttsButton.disabled = false;
+                if (!audioPlayer.src) {
+                     ttsButton.innerHTML = '🔊 Read Explanation Aloud (Gemini TTS)';
+                }
+            }
+        };
+
+        // --- Activity 3: Geothermal Economic Sketch (NEW) ---
+        window.generateEconomicSketch = async function() {
+            const outputDiv = document.getElementById('economic-sketch-output');
+            outputDiv.innerHTML = '<p class="text-center text-red-500">Generating economic feasibility sketch... (LLM analysis) ⏳</p>';
+            
+            const userQuery = `Briefly describe the typical economic profile (CAPEX vs OPEX) of a Flash Steam Geothermal Power Plant. Focus on which costs are highest and why. Provide the response in two short paragraphs.`;
+            const systemPrompt = "You are an infrastructure finance analyst. Provide a sketch of the capital and operational economics for a Flash Steam Geothermal plant, highlighting cost drivers.";
+            
+            try {
+                const sketchText = await fetchLLMResponse(userQuery, systemPrompt, false);
+                
+                outputDiv.innerHTML = `<div class="llm-output-box border-red-500"><h4 class="font-bold text-lg text-red-500">Economic Feasibility Sketch</h4><p>${sketchText}</p></div>`;
+
+            } catch (error) {
+                outputDiv.innerHTML = `<p class="text-red-500">Error generating sketch: ${error.message}</p>`;
+            }
+        };
+
+        // Attach function calls to buttons after DOM load (if not using global scope)
+        window.addEventListener('load', () => {
+            // No explicit attachment needed if functions are in global scope (window.*)
+        });
+
+    </script>
+
+
+    <!-- Fixed Sidebar Navigation -->
+    <nav class="fixed top-0 left-0 h-full w-16 lg:w-64 bg-gray-900 text-white p-4 shadow-2xl z-50 transition-all duration-300">
+        <div class="hidden lg:block">
+            <h2 class="text-xl font-bold mb-8 text-primary-green">FT-IV</h2>
+            <ul class="space-y-4">
+                <li>
+                    <a href="#activity1" class="flex items-center p-3 rounded-lg hover:bg-gray-700 transition duration-150 group">
+                        <svg class="w-6 h-6 mr-3 text-secondary-blue group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10l2-2 2 2m-2-2v8m18-4l-2 2-2-2m2 2v-8m-4-6h-4a2 2 0 00-2 2v4a2 2 0 002 2h4a2 2 0 002-2V6a2 2 0 00-2-2zM7 10h4a2 2 0 002-2V4a2 2 0 00-2-2H7a2 2 0 00-2 2v4a2 2 0 002 2z"></path></svg>
+                        <span class="text-sm font-medium">Activity 1 (Tidal)</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#activity2" class="flex items-center p-3 rounded-lg hover:bg-gray-700 transition duration-150 group">
+                        <svg class="w-6 h-6 mr-3 text-primary-green group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6m-3 0a9 9 0 00-9-9 9 9 0 009 9"></path></svg>
+                        <span class="text-sm font-medium">Activity 2 (Biomass)</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#activity3" class="flex items-center p-3 rounded-lg hover:bg-gray-700 transition duration-150 group">
+                        <svg class="w-6 h-6 mr-3 text-red-500 group-hover:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                        <span class="text-sm font-medium">Activity 3 (Geothermal)</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- Mobile Navigation Toggle (Hamburger) -->
+        <button class="lg:hidden p-2 rounded-lg hover:bg-gray-700">
+            <!-- Icon is just a placeholder, full functionality not required in single file -->
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16m-7 6h7"></path></svg>
+        </button>
+    </nav>
+
+    <!-- Main Content Area -->
+    <main class="ml-16 lg:ml-64 p-4 lg:p-8">
+
+        <!-- Header/Profile Section -->
+        <header class="mb-12 p-6 lg:p-10 bg-white shadow-xl rounded-2xl border-t-4 border-primary-green">
+            <h1 class="text-4xl font-extrabold text-gray-800 mb-2">Clean Energy Systems Portfolio</h1>
+            <p class="text-xl text-gray-600 mb-4">FT-IV Activity Submission</p>
+            <div class="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-8 text-lg">
+                <p class="font-semibold text-primary-green">Name: <span class="font-normal text-gray-700">Divyansh Singh Tomar</span></p>
+                <p class="font-semibold text-primary-green">RA No.: <span class="font-normal text-gray-700">RA2311030010061</span></p>
+            </div>
+        </header>
+
+
+        <!-- Activity 1: Tidal Power Plant -->
+        <section id="activity1" class="content-section mb-12">
+            <h2 class="text-3xl font-bold text-secondary-blue mb-6 border-b-2 pb-2">Activity 1: Tidal Power Plant Architecture (Coastal Village)</h2>
+
+            <!-- Block Diagram -->
+            <h3 class="text-2xl font-semibold text-gray-700 mb-4 mt-8">System Block Diagram: Tidal Barrage Plant</h3>
+            <div class="flex flex-wrap justify-center items-center space-y-4 lg:space-y-0 lg:space-x-4">
+                <div class="diagram-block w-full lg:w-48 bg-blue-100">
+                    <p class="font-bold">Tidal Basin / Sea Water</p>
+                    <p class="text-sm text-gray-500">(Source of Potential Energy)</p>
+                </div>
+                <div class="diagram-arrow hidden lg:block">&rarr;</div>
+                <div class="diagram-arrow block lg:hidden">&#x2193;</div>
+
+                <div class="diagram-block w-full lg:w-48 bg-blue-200">
+                    <p class="font-bold">Barrage / Dam Structure</p>
+                    <p class="text-sm text-gray-500">(Containing Sluice Gates)</p>
+                </div>
+                <div class="diagram-arrow hidden lg:block">&rarr;</div>
+                <div class="diagram-arrow block lg:hidden">&#x2193;</div>
+
+                <div class="diagram-block w-full lg:w-48 bg-blue-300">
+                    <p class="font-bold">Water Passage / Powerhouse</p>
+                    <p class="text-sm text-gray-500">(Housing Turbines)</p>
+                </div>
+                <div class="diagram-arrow hidden lg:block">&rarr;</div>
+                <div class="diagram-arrow block lg:hidden">&#x2193;</div>
+
+                <div class="diagram-block w-full lg:w-48 bg-primary-green">
+                    <p class="font-bold text-white">Turbine & Generator</p>
+                    <p class="text-sm text-white/80">(Conversion to Electrical Energy)</p>
+                </div>
+                <div class="diagram-arrow hidden lg:block">&rarr;</div>
+                <div class="diagram-arrow block lg:hidden">&#x2193;</div>
+
+                <div class="diagram-block w-full lg:w-48 bg-gray-100">
+                    <p class="font-bold">Grid / Coastal Village Load</p>
+                    <p class="text-sm text-gray-500">(Utilization)</p>
+                </div>
+            </div>
+
+            <!-- Explanation -->
+            <h3 class="text-2xl font-semibold text-gray-700 mb-4 mt-8">Explanation (Tidal Power)</h3>
+            <p class="text-gray-700 text-lg leading-relaxed">
+                The **source of energy** for a tidal power plant is the gravitational interaction between the Earth, Moon, and Sun, which creates predictable, massive movements of ocean water (tides). The **conversion process** utilizes a barrage (a large dam) built across a tidal bay or estuary. Sluice gates in the barrage are opened to allow the basin to fill during high tide and empty during low tide. The resulting difference in water level (head) creates a flow, which is harnessed by robust, reversible **turbines** and connected generators to produce electricity. This conversion captures the **potential energy** stored in the elevated water and turns it into kinetic energy. The **output/utilization** is reliable, base-load electricity, which is highly valuable for stable grid operation or for powering a remote coastal village, reducing reliance on fossil fuels. Its **real-world application relevance** lies in its predictability; unlike wind or solar, tidal cycles are known years in advance, making it a highly reliable and efficient form of renewable energy for regions with high tidal ranges.
+            </p>
+
+            <!-- NEW Gemini Feature: Glossary Lookup -->
+            <h3 class="text-xl font-semibold text-gray-700 mb-3 mt-8">Engineering Glossary Lookup (Gemini LLM)</h3>
+            <div class="flex flex-col sm:flex-row space-y-3 sm:space-y-0 sm:space-x-3 items-stretch">
+                <input type="text" id="glossary-term-input" placeholder="Enter a term (e.g., Barrage, Turbine, Head)" class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-secondary-blue focus:border-secondary-blue">
+                <button onclick="lookupGlossaryTerm()" class="px-6 py-3 bg-secondary-blue text-white font-bold rounded-full shadow-lg hover:bg-blue-600 transition duration-300 transform hover:scale-105 flex-shrink-0">
+                    ✨ Define Term
+                </button>
+            </div>
+            <div id="glossary-output">
+                <!-- LLM output will appear here -->
+            </div>
+
+            <!-- Existing Gemini API Feature: Sustainability Analysis -->
+            <button onclick="analyzeTidalSustainability()" id="analyze-button" class="mt-6 px-6 py-2 bg-secondary-blue text-white font-bold rounded-full shadow-lg hover:bg-blue-600 transition duration-300 transform hover:scale-105">
+                ✨ Analyze Sustainability (Gemini + Search)
+            </button>
+            <div id="tidal-analysis-output">
+                <!-- LLM output will appear here -->
+            </div>
+        </section>
+
+        <!-- Activity 2: Biomass-Biogas Generation -->
+        <section id="activity2" class="content-section mb-12">
+            <h2 class="text-3xl font-bold text-primary-green mb-6 border-b-2 pb-2">Activity 2: Biomass-Based Biogas Generation (Dairy Farm)</h2>
+
+            <!-- Block Diagram -->
+            <h3 class="text-2xl font-semibold text-gray-700 mb-4 mt-8">System Block Diagram: Anaerobic Digestion for Biogas</h3>
+            <div class="flex flex-wrap justify-center items-center space-y-4 lg:space-y-0 lg:space-x-4">
+                <div class="diagram-block w-full lg:w-48 bg-yellow-100">
+                    <p class="font-bold">Manure Collection</p>
+                    <p class="text-sm text-gray-500">(From 100 Cattle)</p>
+                </div>
+                <div class="diagram-arrow hidden lg:block">&rarr;</div>
+                <div class="diagram-arrow block lg:hidden">&#x2193;</div>
+
+                <div class="diagram-block w-full lg:w-48 bg-yellow-200">
+                    <p class="font-bold">Mixing Tank / Hydrolysis</p>
+                    <p class="text-sm text-gray-500">(Manure + Water)</p>
+                </div>
+                <div class="diagram-arrow hidden lg:block">&rarr;</div>
+                <div class="diagram-arrow block lg:hidden">&#x2193;</div>
+
+                <div class="diagram-block w-full lg:w-48 bg-yellow-300">
+                    <p class="font-bold">Anaerobic Digester</p>
+                    <p class="text-sm text-gray-500">(Sealed Tank for Fermentation)</p>
+                </div>
+                <div class="diagram-arrow hidden lg:block flex-shrink-0">
+                    <span class="text-base font-bold absolute -translate-y-6 translate-x-1/2 bg-gray-50 px-2 text-green-700">GAS OUTPUT</span>
+                    &rarr;
+                </div>
+                <div class="diagram-arrow block lg:hidden">&#x2193;</div>
+
+                <div class="diagram-block w-full lg:w-48 bg-primary-green">
+                    <p class="font-bold text-white">Gas Storage & Utilization</p>
+                    <p class="text-sm text-white/80">(Cooking / Heating / Generator)</p>
+                </div>
+
+                <div class="w-full h-12"></div> <!-- Spacer for Slurry Flow -->
+
+                <div class="diagram-block w-full lg:w-96 bg-gray-100 mt-[-2rem] lg:mt-0">
+                    <p class="font-bold">Bio-Slurry Output</p>
+                    <p class="text-sm text-gray-500">(Used as nutrient-rich, pathogen-free organic fertilizer)</p>
+                </div>
+            </div>
+
+            <!-- Explanation -->
+            <h3 class="text-2xl font-semibold text-gray-700 mb-4 mt-8">Explanation (Biogas System)</h3>
+            <p class="text-gray-700 text-lg leading-relaxed">
+                The **source of energy** is organic waste, specifically the cattle manure from the dairy farm (100 cattle). This waste is rich in organic matter suitable for microbial decomposition. The **conversion process** is called **Anaerobic Digestion (AD)**, where the manure is mixed with water and fed into a sealed, oxygen-free digester. Here, specialized bacteria break down the organic compounds through hydrolysis, acidogenesis, and finally, methanogenesis, resulting in the creation of biogas (primarily methane, $\text{CH}_4$). The **output/utilization** includes two valuable products: **biogas**, which is a clean fuel used directly for cooking, heating, or running an electricity generator for farm operations; and **bio-slurry**, a nutrient-rich digestate that serves as an excellent organic fertilizer. This system provides significant **real-world application relevance** to dairy farms by transforming a waste disposal problem into an energy and fertilizer production opportunity, promoting circular economy principles, improving sanitation, and achieving energy independence for the rural community.
+            </p>
+
+            <!-- Existing Gemini API Feature: Efficiency Checklist -->
+            <button onclick="generateBiogasChecklist()" id="checklist-button" class="mt-6 px-6 py-2 bg-primary-green text-white font-bold rounded-full shadow-lg hover:bg-green-600 transition duration-300 transform hover:scale-105">
+                ✨ Optimize Biogas Efficiency (Gemini LLM)
+            </button>
+            <div id="biogas-checklist-output">
+                <!-- LLM output will appear here -->
+            </div>
+        </section>
+
+        <!-- Activity 3: Geothermal Power Plant -->
+        <section id="activity3" class="content-section mb-12">
+            <h2 class="text-3xl font-bold text-red-500 mb-6 border-b-2 pb-2">Activity 3: Geothermal Power Plant System (Hot Water Wells)</h2>
+
+            <!-- Block Diagram -->
+            <h3 class="text-2xl font-semibold text-gray-700 mb-4 mt-8">System Block Diagram: Flash Steam Geothermal Plant</h3>
+            <div class="flex flex-wrap justify-center items-center space-y-4 lg:space-y-0 lg:space-x-4">
+                <div class="diagram-block w-full lg:w-48 bg-red-100">
+                    <p class="font-bold">Hot Water / Brine Reservoir</p>
+                    <p class="text-sm text-gray-500">(Source: Earth's Core Heat)</p>
+                </div>
+                <div class="diagram-arrow hidden lg:block">&rarr;</div>
+                <div class="diagram-arrow block lg:hidden">&#x2193;</div>
+
+                <div class="diagram-block w-full lg:w-48 bg-red-200">
+                    <p class="font-bold">Production Well</p>
+                    <p class="text-sm text-gray-500">(Extracts High-Pressure Fluid)</p>
+                </div>
+                <div class="diagram-arrow hidden lg:block">&rarr;</div>
+                <div class="diagram-arrow block lg:hidden">&#x2193;</div>
+
+                <div class="diagram-block w-full lg:w-48 bg-red-300">
+                    <p class="font-bold">Separator / Flash Tank</p>
+                    <p class="text-sm text-gray-500">(Drops Pressure to Create Steam)</p>
+                </div>
+                <div class="diagram-arrow hidden lg:block flex-shrink-0">
+                    <span class="text-base font-bold absolute -translate-y-6 translate-x-1/2 bg-gray-50 px-2 text-green-700">STEAM</span>
+                    &rarr;
+                </div>
+                <div class="diagram-arrow block lg:hidden">&#x2193;</div>
+
+                <div class="diagram-block w-full lg:w-48 bg-primary-green">
+                    <p class="font-bold text-white">Turbine & Generator</p>
+                    <p class="text-sm text-white/80">(Conversion to Electrical Energy)</p>
+                </div>
+            </div>
+
+            <div class="w-full flex justify-center mt-6">
+                <p class="text-xl font-bold text-gray-600">&#x2193; (Spent Fluid/Water)</p>
+            </div>
+            <div class="w-full flex justify-center mt-2">
+                <div class="diagram-block w-full lg:w-96 bg-gray-100">
+                    <p class="font-bold">Condenser & Injection Well</p>
+                    <p class="text-sm text-gray-500">(Return fluid to Earth to sustain reservoir)</p>
+                </div>
+            </div>
+
+            <!-- Explanation -->
+            <h3 class="text-2xl font-semibold text-gray-700 mb-4 mt-8">Explanation (Geothermal Power)</h3>
+            <p class="text-gray-700 text-lg leading-relaxed">
+                The **source of energy** is the immense thermal energy stored within the Earth's crust, accessed via hot water and steam reservoirs in geothermally active regions. This system is designed as a **Flash Steam Plant** because it utilizes hot water wells. The **conversion process** begins by pumping high-pressure hot water (above $182^\circ\text{C}$) from the production well into a low-pressure vessel called a separator or flash tank. The sudden pressure drop causes a portion of the hot water to "flash" into steam. This high-velocity steam is then channeled to drive a conventional **turbine** connected to an electrical generator. The remaining hot water and condensed steam are injected back into the earth via the **injection well** to reheat and replenish the reservoir, ensuring sustainability. The **output/utilization** is clean, continuous **base-load electricity**. The **real-world application relevance** is that geothermal energy provides extremely reliable, $24/7$ power generation (high capacity factor) regardless of weather conditions, making it an essential component for grid stability in countries located on tectonic plate boundaries, like Iceland or the Philippines.
+            </p>
+
+            <!-- NEW Gemini Feature: Economic Sketch -->
+            <button onclick="generateEconomicSketch()" id="economic-sketch-button" class="mt-6 px-6 py-2 bg-red-600 text-white font-bold rounded-full shadow-lg hover:bg-red-700 transition duration-300 transform hover:scale-105 mr-3">
+                ✨ Generate Economic Sketch
+            </button>
+
+            <!-- Existing LLM Feature: Text-to-Speech (TTS) -->
+            <button onclick="readGeothermalExplanation()" id="tts-button" class="mt-6 px-6 py-2 bg-red-500 text-white font-bold rounded-full shadow-lg hover:bg-red-600 transition duration-300 transform hover:scale-105">
+                🔊 Read Explanation Aloud (Gemini TTS)
+            </button>
+            <div id="economic-sketch-output">
+                <!-- LLM output will appear here -->
+            </div>
+            <audio id="audio-player" class="mt-4 w-full" controls></audio>
+        </section>
+
+        <!-- Footer -->
+        <footer class="mt-16 p-4 text-center text-gray-500 border-t border-gray-200">
+            <p>&copy; 2025 Divyansh Singh Tomar | RA2311030010061</p>
+        </footer>
+
+    </main>
+</body>
+</html>
